@@ -1,0 +1,277 @@
+{% extends 'accounts/base.html' %}
+
+{% block title %}Login - Face Recognition Auth{% endblock %}
+
+{% block extra_css %}
+<style>
+    .scanner-active-overlay {
+        display: block !important;
+    }
+    .fallback-trigger {
+        display: block;
+        margin-top: 1.5rem;
+        text-align: center;
+        font-size: 0.9rem;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: color 0.3s;
+    }
+    .fallback-trigger:hover {
+        color: var(--primary);
+    }
+    #password-login-section {
+        display: none;
+        margin-top: 1.5rem;
+        border-top: 1px solid var(--card-border);
+        padding-top: 1.5rem;
+        animation: fadeIn 0.3s ease-out forwards;
+    }
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .biometric-hud {
+        font-size: 0.85rem;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-card">
+    <div style="text-align: center; margin-bottom: 2rem;">
+        <h2 class="gradient-text" style="font-size: 1.8rem; margin-bottom: 0.5rem;">Biometric Login</h2>
+        <p>Scanning for face profile. Position your face in front of the camera.</p>
+    </div>
+
+    <!-- Biometric HUD & Camera Container -->
+    <div id="biometric-login-section">
+        <div class="biometric-hud">
+            <span style="color: var(--text-muted);">Biometric Scanner</span>
+            <span id="scan-status" class="pulse" style="color: var(--success);">ACTIVE SCANNING</span>
+        </div>
+
+        <div class="camera-container" id="camera-box">
+            <video id="webcam" autoplay playsinline muted></video>
+            <div class="scanner-overlay scanner-active-overlay">
+                <div class="scanner-line"></div>
+            </div>
+            <div class="scan-target"></div>
+        </div>
+
+        <div class="status-hud" id="hud">
+            <i class="fa-solid fa-circle-notch fa-spin text-primary" id="hud-icon"></i>
+            <span id="hud-text">Starting video scanner...</span>
+        </div>
+    </div>
+
+    <!-- Fallback Password Login Link -->
+    <span class="fallback-trigger" id="btn-show-password">
+        <i class="fa-solid fa-keyboard"></i> Login with Password instead
+    </span>
+
+    <!-- Traditional Login Form (Hidden by default) -->
+    <div id="password-login-section">
+        <form method="POST" action="{% url 'login' %}">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="username">Username</label>
+                <div class="input-wrapper">
+                    <input type="text" name="username" id="username" class="form-control" placeholder="Enter username">
+                    <i class="fa-solid fa-user"></i>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <div class="input-wrapper">
+                    <input type="password" name="password" id="password" class="form-control" placeholder="Enter password">
+                    <i class="fa-solid fa-lock"></i>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary" style="margin-top: 0.5rem;">
+                <i class="fa-solid fa-right-to-bracket"></i> Login
+            </button>
+        </form>
+    </div>
+
+    <div class="auth-footer">
+        <p>Don't have an account? <a href="{% url 'register' %}">Register here</a></p>
+    </div>
+</div>
+
+<canvas id="hidden-canvas" style="display: none;"></canvas>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const webcam = document.getElementById('webcam');
+    const cameraBox = document.getElementById('camera-box');
+    const hud = document.getElementById('hud');
+    const hudIcon = document.getElementById('hud-icon');
+    const hudText = document.getElementById('hud-text');
+    const scanStatus = document.getElementById('scan-status');
+    const hiddenCanvas = document.getElementById('hidden-canvas');
+    const passwordLoginSection = document.getElementById('password-login-section');
+    const btnShowPassword = document.getElementById('btn-show-password');
+    const biometricLoginSection = document.getElementById('biometric-login-section');
+
+    let stream = null;
+    let scanningActive = true;
+    let scanInterval = null;
+    let failureCount = 0;
+
+    // Start Webcam & Face Scanner
+    async function startScanner() {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { width: 640, height: 480, facingMode: 'user' } 
+            });
+            webcam.srcObject = stream;
+            cameraBox.classList.add('scanning');
+            hudIcon.className = "fa-solid fa-circle-notch fa-spin text-success";
+            hudText.textContent = "Scanning face... Hold still.";
+            
+            // Start automatic polling every 1.5 seconds
+            scanInterval = setInterval(captureAndRecognize, 1500);
+        } catch (err) {
+            console.error("Camera error during login:", err);
+            handleScannerFailure("Camera access blocked. Switch to password login.");
+        }
+    }
+
+    function handleScannerFailure(message) {
+        stopScanner();
+        cameraBox.classList.remove('scanning');
+        cameraBox.classList.add('failed');
+        
+        hudIcon.className = "fa-solid fa-circle-xmark text-error";
+        hudIcon.classList.remove('fa-spin');
+        hudText.textContent = message;
+        
+        scanStatus.textContent = "SCANNER OFFLINE";
+        scanStatus.style.color = "var(--error)";
+        scanStatus.classList.remove('pulse');
+
+        // Automatically reveal password form
+        revealPasswordForm();
+    }
+
+    function stopScanner() {
+        scanningActive = false;
+        if (scanInterval) {
+            clearInterval(scanInterval);
+            scanInterval = null;
+        }
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            stream = null;
+        }
+        const overlay = document.querySelector('.scanner-overlay');
+        if (overlay) {
+            overlay.classList.remove('scanner-active-overlay');
+        }
+    }
+
+    function revealPasswordForm() {
+        passwordLoginSection.style.display = 'block';
+        btnShowPassword.style.display = 'none';
+        // Make fields required since user is typing now
+        document.getElementById('username').setAttribute('required', 'true');
+        document.getElementById('password').setAttribute('required', 'true');
+    }
+
+    // Capture Canvas frame and POST to AJAX Login view
+    async function captureAndRecognize() {
+        if (!scanningActive || !stream) return;
+
+        const width = webcam.videoWidth || 640;
+        const height = webcam.videoHeight || 480;
+        hiddenCanvas.width = width;
+        hiddenCanvas.height = height;
+
+        const ctx = hiddenCanvas.getContext('2d');
+        // Mirror the canvas image to match the video element mirroring
+        ctx.translate(width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(webcam, 0, 0, width, height);
+
+        const dataURL = hiddenCanvas.toDataURL('image/jpeg', 0.9);
+
+        try {
+            hudText.textContent = "Analyzing face structure...";
+            const response = await fetch("{% url 'ajax_face_login' %}", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ image: dataURL })
+            });
+            const result = await response.json();
+
+            if (result.success) {
+                // Login Success Flow
+                stopScanner();
+                cameraBox.classList.remove('scanning');
+                cameraBox.style.borderColor = "var(--success)";
+                cameraBox.style.boxShadow = "0 0 30px var(--success-glow)";
+                
+                hudIcon.className = "fa-solid fa-circle-check text-success";
+                hudIcon.classList.remove('fa-spin');
+                hudText.textContent = result.message;
+                
+                scanStatus.textContent = "MATCH APPROVED";
+                scanStatus.style.color = "var(--success)";
+                scanStatus.classList.remove('pulse');
+
+                // Redirect to dashboard after a short delay for premium feel
+                setTimeout(() => {
+                    window.location.href = "{% url 'dashboard' %}";
+                }, 1200);
+            } else {
+                // Login Fail Flow
+                console.warn("Scan failed: ", result.message);
+                failureCount++;
+                hudText.textContent = result.message + " (" + failureCount + ")";
+                
+                // Blink camera border red briefly to indicate mismatch
+                cameraBox.classList.add('failed');
+                setTimeout(() => cameraBox.classList.remove('failed'), 500);
+
+                // If user fails 5 times, show password login automatically
+                if (failureCount >= 5) {
+                    hudText.textContent = "Unable to match face. Please try logging in with your password.";
+                    revealPasswordForm();
+                }
+            }
+        } catch (err) {
+            console.error("AJAX login error:", err);
+            hudText.textContent = "Network error. Re-trying...";
+        }
+    }
+
+    // Toggle traditional form manually
+    btnShowPassword.addEventListener('click', () => {
+        stopScanner();
+        revealPasswordForm();
+        hudText.textContent = "Scanner deactivated. Log in using password.";
+        hudIcon.className = "fa-solid fa-keyboard text-muted";
+        hudIcon.classList.remove('fa-spin');
+        scanStatus.textContent = "SCANNER DISABLED";
+        scanStatus.style.color = "var(--text-muted)";
+        scanStatus.classList.remove('pulse');
+    });
+
+    // Initialize scanner
+    startScanner();
+
+    // Clean up webcam stream when leaving the page
+    window.addEventListener('beforeunload', stopScanner);
+</script>
+{% endblock %}

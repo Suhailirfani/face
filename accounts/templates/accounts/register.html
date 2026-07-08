@@ -1,0 +1,268 @@
+{% extends 'accounts/base.html' %}
+
+{% block title %}Register - Face Recognition Auth{% endblock %}
+
+{% block extra_css %}
+<style>
+    .capture-btn {
+        background: linear-gradient(135deg, var(--success), #059669);
+        color: white;
+        box-shadow: 0 4px 14px var(--success-glow);
+    }
+    .capture-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px var(--success-glow);
+    }
+    .toggle-fallback {
+        display: block;
+        margin-top: 1rem;
+        text-align: center;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        cursor: pointer;
+        text-decoration: underline;
+    }
+    #captured-preview {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        transform: scaleX(-1);
+        display: none;
+    }
+    .fallback-upload-group {
+        display: none;
+        border: 1px dashed var(--card-border);
+        padding: 1.5rem;
+        border-radius: 16px;
+        text-align: center;
+        margin-bottom: 1.5rem;
+        background: rgba(255,255,255,0.02);
+    }
+    .fallback-upload-group i {
+        font-size: 2rem;
+        color: var(--text-muted);
+        margin-bottom: 0.75rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-card">
+    <div style="text-align: center; margin-bottom: 2rem;">
+        <h2 class="gradient-text" style="font-size: 1.8rem; margin-bottom: 0.5rem;">Create Account</h2>
+        <p>Register your face profile to enable passwordless biometric login.</p>
+    </div>
+
+    <form method="POST" enctype="multipart/form-data" id="register-form">
+        {% csrf_token %}
+        
+        <!-- Username & Passwords -->
+        <div class="form-group">
+            <label for="username">Username</label>
+            <div class="input-wrapper">
+                <input type="text" name="username" id="username" class="form-control" placeholder="Choose a username" required>
+                <i class="fa-solid fa-user"></i>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="password">Password</label>
+            <div class="input-wrapper">
+                <input type="password" name="password" id="password" class="form-control" placeholder="••••••••" required>
+                <i class="fa-solid fa-lock"></i>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="confirm_password">Confirm Password</label>
+            <div class="input-wrapper">
+                <input type="password" name="confirm_password" id="confirm_password" class="form-control" placeholder="••••••••" required>
+                <i class="fa-solid fa-shield"></i>
+            </div>
+        </div>
+
+        <!-- Biometrics Webcam Container -->
+        <div class="biometric-section" id="biometric-section">
+            <label style="display: block; margin-bottom: 0.5rem; font-size: 0.85rem; font-weight: 500; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">Register Face</label>
+            
+            <div class="camera-container" id="camera-box">
+                <video id="webcam" autoplay playsinline muted></video>
+                <img id="captured-preview" alt="Captured face">
+                <div class="scan-target"></div>
+            </div>
+
+            <div class="status-hud" id="hud">
+                <i class="fa-solid fa-circle-notch fa-spin text-primary" id="hud-icon"></i>
+                <span id="hud-text">Initializing webcam...</span>
+            </div>
+
+            <!-- Webcam Actions -->
+            <div style="display: flex; gap: 0.75rem; margin-bottom: 1rem;">
+                <button type="button" class="btn capture-btn" id="btn-capture">
+                    <i class="fa-solid fa-camera"></i> Capture Face
+                </button>
+                <button type="button" class="btn btn-secondary" id="btn-retake" style="display: none;">
+                    <i class="fa-solid fa-rotate-left"></i> Retake
+                </button>
+            </div>
+        </div>
+
+        <!-- Fallback File Upload -->
+        <div class="fallback-upload-group" id="file-upload-section">
+            <i class="fa-solid fa-cloud-arrow-up"></i>
+            <p style="margin-bottom: 1rem; font-size: 0.85rem;">Webcam unavailable. Upload a clear portrait photo instead.</p>
+            <input type="file" name="face_image" id="face_image" accept="image/*" class="form-control" style="padding-left: 1rem;">
+        </div>
+
+        <!-- Hidden input for captured image base64 -->
+        <input type="hidden" name="face_image_base64" id="face_image_base64">
+
+        <button type="submit" class="btn btn-primary" style="margin-top: 0.5rem;" id="btn-submit">
+            <i class="fa-solid fa-user-plus"></i> Sign Up
+        </button>
+
+        <span class="toggle-fallback" id="btn-toggle-fallback">Or upload a photo instead</span>
+    </form>
+
+    <div class="auth-footer">
+        <p>Already have an account? <a href="{% url 'login' %}">Login here</a></p>
+    </div>
+</div>
+
+<canvas id="hidden-canvas" style="display: none;"></canvas>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const webcam = document.getElementById('webcam');
+    const capturedPreview = document.getElementById('captured-preview');
+    const cameraBox = document.getElementById('camera-box');
+    const hud = document.getElementById('hud');
+    const hudIcon = document.getElementById('hud-icon');
+    const hudText = document.getElementById('hud-text');
+    const btnCapture = document.getElementById('btn-capture');
+    const btnRetake = document.getElementById('btn-retake');
+    const btnSubmit = document.getElementById('btn-submit');
+    const btnToggleFallback = document.getElementById('btn-toggle-fallback');
+    const biometricSection = document.getElementById('biometric-section');
+    const fileUploadSection = document.getElementById('file-upload-section');
+    const faceImageBase64Input = document.getElementById('face_image_base64');
+    const faceImageFileInput = document.getElementById('face_image');
+    const registerForm = document.getElementById('register-form');
+    const hiddenCanvas = document.getElementById('hidden-canvas');
+
+    let stream = null;
+    let usingWebcam = true;
+
+    // Start Webcam
+    async function initWebcam() {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { width: 640, height: 480, facingMode: 'user' } 
+            });
+            webcam.srcObject = stream;
+            
+            hudIcon.className = "fa-solid fa-circle-check text-success";
+            hudIcon.classList.remove('fa-spin');
+            hudText.textContent = "Webcam ready. Align your face inside the circle.";
+            cameraBox.classList.add('scanning');
+        } catch (err) {
+            console.error("Webcam access error:", err);
+            switchToFallback("Could not access webcam. Please upload a photo instead.");
+        }
+    }
+
+    function switchToFallback(message = "Webcam interface disabled. Upload a profile photo.") {
+        usingWebcam = false;
+        biometricSection.style.display = 'none';
+        fileUploadSection.style.display = 'block';
+        btnToggleFallback.style.display = 'none';
+        faceImageBase64Input.value = '';
+        
+        // Remove 'required' tag from base64 but set file input
+        faceImageFileInput.setAttribute('required', 'true');
+        
+        // Stop stream if running
+        stopWebcamStream();
+        
+        // Add custom alert
+        hudText.textContent = message;
+    }
+
+    function stopWebcamStream() {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            stream = null;
+        }
+    }
+
+    // Capture Snapshot
+    btnCapture.addEventListener('click', () => {
+        if (!stream) return;
+
+        const width = webcam.videoWidth || 640;
+        const height = webcam.videoHeight || 480;
+        
+        hiddenCanvas.width = width;
+        hiddenCanvas.height = height;
+        
+        const ctx = hiddenCanvas.getContext('2d');
+        // Mirror the canvas image to match the video element mirroring
+        ctx.translate(width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(webcam, 0, 0, width, height);
+        
+        // Convert to base64
+        const dataURL = hiddenCanvas.toDataURL('image/jpeg', 0.95);
+        faceImageBase64Input.value = dataURL;
+        
+        // Show preview, hide video
+        capturedPreview.src = dataURL;
+        capturedPreview.style.display = 'block';
+        webcam.style.display = 'none';
+        
+        // UI updates
+        btnCapture.style.display = 'none';
+        btnRetake.style.display = 'inline-flex';
+        hudIcon.className = "fa-solid fa-camera text-success";
+        hudText.textContent = "Face snapshot captured! Complete the form below.";
+        cameraBox.classList.remove('scanning');
+    });
+
+    // Retake Photo
+    btnRetake.addEventListener('click', () => {
+        faceImageBase64Input.value = '';
+        capturedPreview.style.display = 'none';
+        webcam.style.display = 'block';
+        btnCapture.style.display = 'inline-flex';
+        btnRetake.style.display = 'none';
+        hudIcon.className = "fa-solid fa-circle-check text-success";
+        hudText.textContent = "Webcam ready. Align your face inside the circle.";
+        cameraBox.classList.add('scanning');
+    });
+
+    // Toggle between webcam and file upload manual selection
+    btnToggleFallback.addEventListener('click', () => {
+        if (usingWebcam) {
+            switchToFallback();
+        }
+    });
+
+    // Handle form submit validation
+    registerForm.addEventListener('submit', (e) => {
+        if (usingWebcam && !faceImageBase64Input.value) {
+            e.preventDefault();
+            hudIcon.className = "fa-solid fa-triangle-exclamation text-error";
+            hudText.textContent = "Error: Please capture your face before signing up!";
+            cameraBox.classList.add('failed');
+            setTimeout(() => cameraBox.classList.remove('failed'), 2000);
+        }
+    });
+
+    // Initialize on page load
+    initWebcam();
+
+    // Clean up webcam stream when leaving the page
+    window.addEventListener('beforeunload', stopWebcamStream);
+</script>
+{% endblock %}
